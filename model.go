@@ -1,59 +1,105 @@
 package wfc
 
-import "errors"
+import "math"
 
-// Possible adjacent tile indicies for each tile index.
-type AdjacencyRules map[int]struct{
-	Up		[]int
-	Right	[]int
-	Down	[]int
-	Left	[]int
+type Iterator interface {
+	Iterate(n int) ([][]int, bool, bool)
 }
 
-// Possibility (weight) of each tile index.
-type FrequencyHints map[int]int
-
-type Grid2DSize struct {
-	Width 	int
-	Height	int
+type Generator interface {
+	Generate() ([][]int, bool)
 }
 
-/*
-Populates grid with tile indicies in-place according to the rules present in the input arguments. 
-Returns error if something if something went wrong.
+type ExecBlueprint interface {
+	Iterator
+	Generator
+	InLimits(x, y int) bool
+	Propagate() bool
+	Clear()
+}
 
-If grid is of size 0 (in width or height), no error is returned (nil).
-*/
-func WfcGenerate(
-	grid				*[][]int,
-	adjacencyRules		AdjacencyRules,
-	frequencyHints		FrequencyHints,
-	gridSize			Grid2DSize,
-) error {
-	if len(adjacencyRules) != len(frequencyHints) {
-		return errors.New("adjacencyRules length doesn't match frequencyHints length")
-	}
-	gw := gridSize.Width
-	gh := gridSize.Height
+type BaseModel struct {
+	Wave 					[][][]bool		// Superpositions of each cell (x, y) - all patterns that could be in fit in such cell
+	Changes 				[][]bool		// 2D array of collapsed cells
+	Weights					[]float64		// Frequency hints for each tile index
+	Periodic				bool			// If the input image should be periodic (tesselated surface)
+	GenerationSuccessful	bool			// Whether generation was successful
+	T						int				// Count of possible patterns
+	Fx, Fy					int				// Final width and height of output
+	RngSet					bool			// Random number generator set by user
+	Rng						func() float64	// Random number generator used during generation
+}
 
-	// number of possible indicies
-	ni := len(adjacencyRules) 	
+// Returns true if generation is successful and complete, false otherwise
+func (baseModel *BaseModel) Observe(specificModel ExecBlueprint) bool {
+	min := 1000.0
+	cellminx := -1
+	cellminy := -1
+	distribution := make([]float64, baseModel.T)
+	
+	for x := 0; x < baseModel.Fx; x++ {
+		for y := 0; y < baseModel.Fy; y++ {
+			if !specificModel.InLimits(x, y) {
+				continue
+			}
 
-	indicies := make([]int, ni)
-	for k, _ := range adjacencyRules {
-		indicies = append(indicies, k)
-	}
+			sum := 0.0
+			for t := 0; t < baseModel.T; t++ {
+				if baseModel.Wave[x][y][t] {
+					distribution[t] = baseModel.Weights[t]
+				} else {
+					distribution[t] = 0.0
+				}
+				sum += distribution[t]
+			}
 
-	// pre-populate entire wave
-	wave := make([][][]int, gh)
-	for row := range wave {
-		wave[row] = make([][]int, gw)
-		for cell := range wave[row] {
-			wave[row][cell] = indicies
+			if sum == 0.0 {
+				baseModel.GenerationSuccessful = false
+				return true
+			}
+
+			for t := 0; t < baseModel.T; t++ {
+				distribution[t] /= sum
+			}
+
+			entropy := 0.0
+
+			for i := 0; i < len(distribution); i++ {
+				if distribution[i] > 0.0 {
+					entropy += -distribution[i] * math.Log(distribution[i])
+				}
+			}
+
+			noise := 0.000001 * baseModel.Rng()
+
+			if entropy > 0 && entropy + noise < min {
+				min = entropy + noise
+				cellminx = x
+				cellminy = y
+			}
 		}
 	}
-	gSize := gridSize.Width * gridSize.Height
-	minEntropyCells := []int{}
 
-	return nil
+	if cellminx == -1 && cellminy == -1 {
+		baseModel.GenerationSuccessful = true
+		return true // finished with success
+	}
+
+	for t := 0; t < baseModel.T; t++ {
+		if baseModel.Wave[cellminx][cellminy][t] {
+			distribution[t] = baseModel.Weights[t]
+		} else {
+			distribution[t] = 0.0
+		}
+	}
+
+	r := randomIndex(distribution, baseModel.Rng())
+
+	for t := 0; t < baseModel.T; t++ {
+		baseModel.Wave[cellminx][cellminy][t] = (r == t)
+	}
+
+	baseModel.Changes[cellminx][cellminy] = true
+
+	return false // not finished yet
 }
